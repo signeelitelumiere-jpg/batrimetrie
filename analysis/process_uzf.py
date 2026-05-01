@@ -153,34 +153,75 @@ def process_uzf_file(uzf_path, outdir='analysis/output_new'):
 
         result['tables'] = tables_info
 
-        # Attempt an authoritative automatic merge when gps_data exists
+        # Attempt authoritative automatic merges: prefer boat_multi_data merged with gps_data,
+        # otherwise fall back to gps_data-derived merged frame.
         try:
-            if 'gps_data' in tables:
+            m = None
+            # If boat_multi_data present, build merged from it and join GPS by time or ping
+            if df_bmd is not None:
+                merged = df_bmd.copy()
+                # normalize common column names for depth/easting/northing/ping
+                depth_col = _find_column(merged, ['depth', 'z', 'depth_m', 'elevation', 'high_depth', 'low_depth'])
+                east_col = _find_column(merged, ['easting', 'east', 'x', 'coordx', 'coordinatex'])
+                north_col = _find_column(merged, ['northing', 'north', 'y', 'coordy', 'coordinatey'])
+                ping_col = _find_column(merged, ['ping', 'index', 'sample'])
+                if depth_col and 'depth' not in merged.columns:
+                    merged = merged.rename(columns={depth_col: 'depth'})
+                if east_col and 'easting' not in merged.columns:
+                    merged = merged.rename(columns={east_col: 'easting'})
+                if north_col and 'northing' not in merged.columns:
+                    merged = merged.rename(columns={north_col: 'northing'})
+                if ping_col and 'ping' not in merged.columns:
+                    merged = merged.rename(columns={ping_col: 'ping'})
+
+                # If gps_data exists, try to merge by nearest timestamp or ping
+                if df_gps is not None:
+                    try:
+                        # find time columns
+                        def find_time_col(df):
+                            for c in df.columns:
+                                lc = c.lower()
+                                if 'time' in lc or 'date' in lc or 'timestamp' in lc:
+                                    return c
+                            return None
+
+                        t_gps = find_time_col(df_gps)
+                        t_boat = find_time_col(merged)
+                        if t_gps and t_boat:
+                            df_gps['__t'] = pd.to_datetime(df_gps[t_gps], errors='coerce')
+                            merged['__t'] = pd.to_datetime(merged[t_boat], errors='coerce')
+                            df_gps_sorted = df_gps.sort_values('__t')
+                            merged_sorted = merged.sort_values('__t')
+                            merged2 = pd.merge_asof(merged_sorted, df_gps_sorted, on='__t', direction='nearest')
+                            m = merged2
+                        else:
+                            # fall back to ping-based merge
+                            if 'ping' in merged.columns and 'ping' in df_gps.columns:
+                                m = pd.merge(merged, df_gps, on='ping', how='left', suffixes=('', '_gps'))
+                    except Exception:
+                        m = merged
+                else:
+                    m = merged
+
+            # If no boat-based merged frame, try to build from gps_data directly (legacy behavior)
+            if m is None and 'gps_data' in tables:
                 dfg = pd.read_sql_query('SELECT * FROM gps_data', conn)
                 dfg = _decode_dataframe_blobs(dfg)
-                # build merged dataframe using explicit column names
                 m = pd.DataFrame()
-                # easting / northing (nez_x / nez_y) are present in this schema
                 if 'nez_x' in dfg.columns:
                     m['easting'] = pd.to_numeric(dfg['nez_x'], errors='coerce')
                 if 'nez_y' in dfg.columns:
                     m['northing'] = pd.to_numeric(dfg['nez_y'], errors='coerce')
-                # depth: prefer high_depth then low_depth then try point_name
                 if 'high_depth' in dfg.columns:
                     m['depth'] = pd.to_numeric(dfg['high_depth'], errors='coerce')
                 elif 'low_depth' in dfg.columns:
                     m['depth'] = pd.to_numeric(dfg['low_depth'], errors='coerce')
                 elif 'point_name' in dfg.columns:
-                    # some datasets encode depth in point_name like '1.120'
                     m['depth'] = pd.to_numeric(dfg['point_name'], errors='coerce')
-
-                # lat/lon
                 if 'latitude' in dfg.columns:
                     m['Lat'] = pd.to_numeric(dfg['latitude'], errors='coerce')
                 if 'longitude' in dfg.columns:
                     m['Lon'] = pd.to_numeric(dfg['longitude'], errors='coerce')
-
-                # datetime from utcTime (try ms then s)
                 if 'utcTime' in dfg.columns:
                     try:
                         m['datetime'] = pd.to_datetime(dfg['utcTime'], unit='ms', errors='coerce')
@@ -188,8 +229,6 @@ def process_uzf_file(uzf_path, outdir='analysis/output_new'):
                             m['datetime'] = pd.to_datetime(dfg['utcTime'], unit='s', errors='coerce')
                     except Exception:
                         m['datetime'] = pd.NaT
-
-                # GroundH(H): prefer 'altitude' or 'annerHigh'
                 gh = None
                 if 'altitude' in dfg.columns:
                     gh = pd.to_numeric(dfg['altitude'], errors='coerce')
@@ -198,17 +237,116 @@ def process_uzf_file(uzf_path, outdir='analysis/output_new'):
                 if gh is not None:
                     m['GroundH(H)'] = gh
 
-                # compute z_water and z_bed if possible
-                if 'GroundH(H)' in m.columns:
-                    m['z_water'] = m['GroundH(H)']
-                elif 'Lat' in m.columns and 'Lon' in m.columns:
-                    # fallback: no ground elevation available, set 0
-                    m['z_water'] = 0.0
+                # ensure canonical OWENDO columns exist
+                if 'easting' in m.columns:
+                    m['CoordinateX'] = pd.to_numeric(m['easting'], errors='coerce')
+                if 'northing' in m.columns:
+                    m['CoordinateY'] = pd.to_numeric(m['northing'], errors='coerce')
                 if 'depth' in m.columns:
-                    m['z_bed'] = m['z_water'] - m['depth']
+                    m['h'] = pd.to_numeric(m['depth'], errors='coerce')
+                if 'GroundH(H)' not in m.columns:
+                    # attempt to derive ground height from altitude-like fields
+                    if 'altitude' in dfg.columns:
+                        m['GroundH(H)'] = pd.to_numeric(dfg['altitude'], errors='coerce')
+                    elif 'annerHigh' in dfg.columns:
+                        m['GroundH(H)'] = pd.to_numeric(dfg['annerHigh'], errors='coerce')
+                    else:
+                        # fallback: use h
+                        m['GroundH(H)'] = m.get('h')
+
+                # z_water / z_bed
+                try:
+                    m['z_water'] = pd.to_numeric(m['GroundH(H)'], errors='coerce').fillna(0.0)
+                except Exception:
+                    m['z_water'] = 0.0
+                try:
+                    hnum = pd.to_numeric(m.get('h'), errors='coerce')
+                    if (hnum.dropna() < 0).mean() > 0.5:
+                        m['z_bed'] = m['z_water'] - hnum
+                    else:
+                        m['z_bed'] = m['z_water'] - hnum.abs()
+                except Exception:
+                    m['z_bed'] = m['z_water']
+
+                # ensure Lat/Lon exist
+                if 'Lat' not in m.columns:
+                    m['Lat'] = ''
+                if 'Lon' not in m.columns:
+                    m['Lon'] = ''
+                # defaults
+                if 'Locked' not in m.columns:
+                    m['Locked'] = 0
+                if 'Sats' not in m.columns:
+                    m['Sats'] = 0
+                if 'Status' not in m.columns:
+                    m['Status'] = ''
 
                 # save merged CSV
                 merged_auto = outdir / (p.stem + '_merged_auto.csv')
+                # Ensure common columns are present and normalized
+                def ensure_common_columns(df):
+                    import pandas as _pd
+                    # depth normalization
+                    if 'depth' in df.columns:
+                        df['depth'] = _pd.to_numeric(df['depth'], errors='coerce')
+                    # h fallback
+                    if 'h' not in df.columns and 'depth' in df.columns:
+                        df['h'] = df['depth']
+                    # GroundH(H)
+                    if 'GroundH(H)' not in df.columns:
+                        if 'z_water' in df.columns:
+                            df['GroundH(H)'] = df['z_water']
+                        else:
+                            df['GroundH(H)'] = 0.0
+                    # Lat/Lon ensure numeric
+                    if 'Lat' in df.columns:
+                        df['Lat'] = _pd.to_numeric(df['Lat'], errors='coerce')
+                    if 'Lon' in df.columns:
+                        df['Lon'] = _pd.to_numeric(df['Lon'], errors='coerce')
+                    # datetime
+                    if 'datetime' not in df.columns and 'utcTime' in df.columns:
+                        try:
+                            df['datetime'] = _pd.to_datetime(df['utcTime'], unit='ms', errors='coerce')
+                            if df['datetime'].isna().all():
+                                df['datetime'] = _pd.to_datetime(df['utcTime'], unit='s', errors='coerce')
+                        except Exception:
+                            df['datetime'] = _pd.NaT
+                    elif 'datetime' not in df.columns:
+                        df['datetime'] = _pd.NaT
+                    # Locked / Sats / Status
+                    if 'Locked' not in df.columns:
+                        df['Locked'] = 0
+                    if 'Sats' not in df.columns:
+                        df['Sats'] = 0
+                    if 'Status' not in df.columns:
+                        df['Status'] = ''
+                    # placeholders f2..f8 and numeric counterparts
+                    for i in range(2,9):
+                        cname = f'f{i}'
+                        numc = f'f{i}_num'
+                        if cname not in df.columns:
+                            df[cname] = _pd.NA
+                        if numc not in df.columns:
+                            df[numc] = _pd.to_numeric(df.get(cname), errors='coerce')
+                    # ensure z_water / z_bed
+                    if 'z_water' not in df.columns:
+                        df['z_water'] = _pd.to_numeric(df['GroundH(H)'], errors='coerce').fillna(0.0)
+                    if 'z_bed' not in df.columns:
+                        if 'h' in df.columns:
+                            try:
+                                hnum = _pd.to_numeric(df['h'], errors='coerce')
+                                # if most h negative, keep sign; else use abs
+                                if (hnum.dropna() < 0).mean() > 0.5:
+                                    df['z_bed'] = df['z_water'] - hnum
+                                else:
+                                    df['z_bed'] = df['z_water'] - hnum.abs()
+                            except Exception:
+                                df['z_bed'] = df['z_water']
+                        else:
+                            df['z_bed'] = df['z_water']
+                    return df
+
+                m = ensure_common_columns(m)
                 m.to_csv(merged_auto, index=False)
                 result['merged_csv'] = str(merged_auto)
 
@@ -219,9 +357,28 @@ def process_uzf_file(uzf_path, outdir='analysis/output_new'):
                     created_gps = None
                     # prefer existing gps export
                     if df_gps is not None:
-                        # if gps already has Lat/Lon columns, copy to canonical
+                        # if gps already has Lat/Lon columns, copy to canonical but ensure z_water/z_bed present
                         gps_df = df_gps.copy()
-                        # normalize possible column names
+                        # try to compute z_water from altitude-like fields if missing
+                        if 'z_water' not in gps_df.columns:
+                            if 'altitude' in gps_df.columns:
+                                gps_df['z_water'] = pd.to_numeric(gps_df['altitude'], errors='coerce')
+                            elif 'annerHigh' in gps_df.columns:
+                                gps_df['z_water'] = pd.to_numeric(gps_df['annerHigh'], errors='coerce')
+                            else:
+                                gps_df['z_water'] = 0.0
+                        # compute z_bed if depth-like column exists
+                        depth_col = None
+                        for cand in ('high_depth','low_depth','depth','point_depth','depth_m'):
+                            if cand in gps_df.columns:
+                                depth_col = cand
+                                break
+                        if 'z_bed' not in gps_df.columns:
+                            if depth_col is not None:
+                                gps_df['z_bed'] = pd.to_numeric(gps_df['z_water'], errors='coerce').fillna(0.0) - pd.to_numeric(gps_df[depth_col], errors='coerce').fillna(0.0)
+                            else:
+                                gps_df['z_bed'] = gps_df['z_water']
+                        # normalize possible column names for lat/lon and write
                         if any(c.lower() in ('latitude','lat') for c in gps_df.columns) and any(c.lower() in ('longitude','lon') for c in gps_df.columns):
                             gps_df.to_csv(canonical_gps, index=False)
                             created_gps = canonical_gps
@@ -285,6 +442,18 @@ def process_uzf_file(uzf_path, outdir='analysis/output_new'):
                             result['3d_png'] = None
                 except Exception:
                     pass
+                # After creating outputs, ensure all CSVs in outdir are normalized
+                try:
+                    # import function if available as module
+                    from analysis.scripts.normalize_all_outputs import normalize_outputs
+                    normalize_outputs(str(outdir))
+                except Exception:
+                    try:
+                        # fallback: run script directly
+                        import subprocess, sys
+                        subprocess.run([sys.executable, str(Path('analysis/scripts/normalize_all_outputs.py')), str(outdir)])
+                    except Exception:
+                        pass
         except Exception:
             pass
 

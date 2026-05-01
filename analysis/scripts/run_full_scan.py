@@ -14,6 +14,10 @@ import pandas as pd
 from pathlib import Path
 import subprocess
 import sys
+try:
+    from analysis.process_usf import process_usf_file
+except Exception:
+    process_usf_file = None
 
 BASE_DIR = Path('owendo-05-04-26-4-Outcome data_uzf')
 OUT_DIR = Path('analysis') / 'output_new'
@@ -40,6 +44,23 @@ else:
         except Exception:
             # fallback to repr
             print(' -', repr(p))
+
+# also look for .usf files (some providers use .usf extension)
+usf_files = list(BASE_DIR.glob('*.usf')) + list(BASE_DIR.glob('**/*.usf'))
+if usf_files:
+    print('Found .usf files:')
+    for up in usf_files:
+        try:
+            print(' -', str(up))
+        except Exception:
+            print(' -', repr(up))
+        # try processing via process_usf if available
+        if process_usf_file is not None:
+            try:
+                print('Processing .usf via process_usf_file...')
+                process_usf_file(str(up), outdir=str(OUT_DIR))
+            except Exception as e:
+                print('Failed to process .usf:', e)
 
 rows = []
 for p in dat_files:
@@ -81,8 +102,116 @@ for p in dat_files:
         except Exception:
             print('Failed to read file (encoding issue)')
 
-if rows:
-    df_new = pd.DataFrame(rows)
+    if rows:
+        df_new = pd.DataFrame(rows)
+        # Compute z_water and z_bed immediately so outputs include them
+        try:
+            # prefer per-row GroundH(H) if present and not all-null
+            if any(c.lower().replace(' ', '') == 'groundh(h)'.lower().replace(' ', '') for c in df_new.columns):
+                colname = [c for c in df_new.columns if c.lower().replace(' ', '') == 'groundh(h)'.lower().replace(' ', '')][0]
+                if not df_new[colname].isna().all():
+                    df_new['z_water'] = pd.to_numeric(df_new[colname], errors='coerce')
+                else:
+                    df_new['z_water'] = 0.0
+            else:
+                # fallback to config groundh_offset
+                cfgp = Path('owendo-05-04-26-4-Outcome data_uzf/owendo_config.json')
+                if cfgp.exists():
+                    try:
+                        import json
+                        cfg = json.loads(cfgp.read_text())
+                        off = cfg.get('groundh_offset')
+                        if off is not None:
+                            df_new['z_water'] = float(off)
+                        else:
+                            df_new['z_water'] = 0.0
+                    except Exception:
+                        df_new['z_water'] = 0.0
+                else:
+                    df_new['z_water'] = 0.0
+
+                # compute z_bed from h or depth-like columns
+                if 'h' in df_new.columns or any('depth' in c.lower() for c in df_new.columns):
+                    # choose depth candidate
+                    dcol = 'h' if 'h' in df_new.columns else next((c for c in df_new.columns if 'depth' in c.lower()), None)
+                    try:
+                        hnum = pd.to_numeric(df_new[dcol], errors='coerce')
+                        if (hnum.dropna() < 0).mean() > 0.5:
+                            df_new['z_bed'] = df_new['z_water'] + hnum
+                        else:
+                            df_new['z_bed'] = df_new['z_water'] - hnum.abs()
+                    except Exception:
+                        df_new['z_bed'] = df_new['z_water']
+                else:
+                    df_new['z_bed'] = df_new['z_water']
+
+            # Ensure common columns for outputs (Lat/Lon, GroundH(H), datetime, Locked/Sats/Status, placeholders)
+            def ensure_common_columns(df):
+                import pandas as _pd
+                # Lat/Lon
+                for c in ('Lat','latitude'):
+                    if c in df.columns:
+                        df['Lat'] = _pd.to_numeric(df[c], errors='coerce')
+                        break
+                for c in ('Lon','longitude'):
+                    if c in df.columns:
+                        df['Lon'] = _pd.to_numeric(df[c], errors='coerce')
+                        break
+                # GroundH(H)
+                if 'GroundH(H)' not in df.columns:
+                    if 'z_water' in df.columns:
+                        df['GroundH(H)'] = df['z_water']
+                    else:
+                        df['GroundH(H)'] = 0.0
+                # datetime from utcTime
+                if 'datetime' not in df.columns and 'utcTime' in df.columns:
+                    try:
+                        df['datetime'] = _pd.to_datetime(df['utcTime'], unit='ms', errors='coerce')
+                        if df['datetime'].isna().all():
+                            df['datetime'] = _pd.to_datetime(df['utcTime'], unit='s', errors='coerce')
+                    except Exception:
+                        df['datetime'] = _pd.NaT
+                elif 'datetime' not in df.columns:
+                    df['datetime'] = _pd.NaT
+                # Locked / Sats / Status
+                if 'Locked' not in df.columns:
+                    df['Locked'] = 0
+                if 'Sats' not in df.columns:
+                    df['Sats'] = 0
+                if 'Status' not in df.columns:
+                    df['Status'] = ''
+                # placeholders
+                for i in range(2,9):
+                    cname = f'f{i}'
+                    numc = f'f{i}_num'
+                    if cname not in df.columns:
+                        df[cname] = _pd.NA
+                    if numc not in df.columns:
+                        df[numc] = _pd.to_numeric(df.get(cname), errors='coerce')
+                # ensure z cols
+                if 'z_water' not in df.columns:
+                    df['z_water'] = _pd.to_numeric(df['GroundH(H)'], errors='coerce').fillna(0.0)
+                if 'z_bed' not in df.columns:
+                    if 'h' in df.columns:
+                        try:
+                            hnum = _pd.to_numeric(df['h'], errors='coerce')
+                            if (hnum.dropna() < 0).mean() > 0.5:
+                                df['z_bed'] = df['z_water'] - hnum
+                            else:
+                                df['z_bed'] = df['z_water'] - hnum.abs()
+                        except Exception:
+                            df['z_bed'] = df['z_water']
+                    else:
+                        df['z_bed'] = df['z_water']
+                return df
+
+            df_new = ensure_common_columns(df_new)
+        except Exception:
+            # ensure columns exist even on failure
+            if 'z_water' not in df_new.columns:
+                df_new['z_water'] = 0.0
+            if 'z_bed' not in df_new.columns:
+                df_new['z_bed'] = df_new['z_water']
     # write or append to merged_data_with_owendo_cols.csv
     owendo_path = OUT_DIR / 'merged_data_with_owendo_cols.csv'
     if owendo_path.exists():
@@ -200,10 +329,31 @@ try:
         else:
             df_all['z_bed'] = df_all['z_water']
 
+        # overwrite the main OWENDO merged file so downstream previews include z columns
+        df_all.to_csv(owendo_csv, index=False)
         out_z = OUT_DIR / 'merged_data_with_owendo_cols_z.csv'
         df_all.to_csv(out_z, index=False)
+        # update preview files so they include z_water / z_bed
+        try:
+            df_all.head(100).to_csv(OUT_DIR / 'preview_merged_new_head100_with_z.csv', index=False)
+        except Exception:
+            pass
+        try:
+            df_all.head(100).to_csv(OUT_DIR / 'preview_owendo_head100.csv', index=False)
+        except Exception:
+            pass
         print('Wrote z-enhanced merged file:', out_z)
 except Exception as e:
     print('Failed to post-process z columns:', e)
 
 print('run_full_scan completed')
+# normalize outputs to ensure all CSVs have required columns
+try:
+    from analysis.scripts.normalize_all_outputs import normalize_outputs
+    normalize_outputs(str(OUT_DIR))
+except Exception:
+    try:
+        import subprocess, sys
+        subprocess.run([sys.executable, str(Path('analysis/scripts/normalize_all_outputs.py')), str(OUT_DIR)])
+    except Exception:
+        pass

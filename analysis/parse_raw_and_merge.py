@@ -146,10 +146,94 @@ def main():
     if "datetime_parsed" in df.columns and not df["datetime_parsed"].isna().all():
         df = df.sort_values(by=["datetime_parsed"])
 
+    # Ensure canonical OWENDO-style columns and compute z_water / z_bed
+    # CoordinateX/CoordinateY: use easting/northing
+    if 'easting' in df.columns:
+        df['CoordinateX'] = pd.to_numeric(df['easting'], errors='coerce')
+    if 'northing' in df.columns:
+        df['CoordinateY'] = pd.to_numeric(df['northing'], errors='coerce')
+    # h: use depth if present
+    if 'depth' in df.columns:
+        df['h'] = pd.to_numeric(df['depth'], errors='coerce')
+    else:
+        df['h'] = pd.NA
+    # GroundH(H): try to derive from available altitude-like fields, else fallback to h
+    if 'GroundH(H)' not in df.columns:
+        # no altitude in Ln*.data parsing; set to h (mirrors existing OWENDO outputs)
+        df['GroundH(H)'] = df['h']
+    # Lat / Lon: not available in Ln*.data parsing — initialize as NA (numeric)
+    if 'Lat' not in df.columns:
+        df['Lat'] = pd.NA
+    if 'Lon' not in df.columns:
+        df['Lon'] = pd.NA
+    # Locked / Sats / Status defaults
+    if 'Locked' not in df.columns:
+        df['Locked'] = 0
+    if 'Sats' not in df.columns:
+        df['Sats'] = 0
+    if 'Status' not in df.columns:
+        df['Status'] = ''
+
+    # z_water / z_bed computation with sign heuristic — ensure numeric
+    zw = pd.to_numeric(df.get('GroundH(H)'), errors='coerce')
+    df['z_water'] = zw.fillna(0.0)
+    hnum = pd.to_numeric(df.get('h'), errors='coerce')
+    # if most h values are negative, treat h as negative offsets from surface
+    if hnum.dropna().shape[0] > 0 and (hnum.dropna() < 0).mean() > 0.5:
+        df['z_bed'] = df['z_water'] + hnum.fillna(0.0)
+    else:
+        df['z_bed'] = df['z_water'] - hnum.abs().fillna(0.0)
+
+    # ensure numeric types
+    df['z_water'] = pd.to_numeric(df['z_water'], errors='coerce')
+    df['z_bed'] = pd.to_numeric(df['z_bed'], errors='coerce')
+
     cols = [c for c in ("src_file", "ping", "datetime", "datetime_parsed", "easting", "northing", "depth") if c in df.columns]
-    other = [c for c in df.columns if c not in cols]
-    df.to_csv(out_path, index=False, columns=cols + other)
+    # prefer to expose canonical columns first
+    pref = ["CoordinateY","CoordinateX","h","GroundH(H)","Lat","Lon","Locked","Sats","Status","z_water","z_bed"]
+    other = [c for c in df.columns if c not in cols and c not in pref]
+    write_cols = []
+    # include src/ping/datetime fields
+    write_cols.extend(cols)
+    # then canonical pref (if present)
+    for c in pref:
+        if c in df.columns:
+            write_cols.append(c)
+    write_cols.extend(other)
+    df.to_csv(out_path, index=False, columns=write_cols)
     print(f"Wrote merged table: {out_path} ({len(df)} rows)")
+    # Ensure Lat/Lon if easting/northing available
+    # Compute Lat/Lon from easting/northing when available and values appear projected
+    try:
+        need_latlon = ('Lat' in df.columns and df['Lat'].isna().all()) or ('Lon' in df.columns and df['Lon'].isna().all())
+        if need_latlon and 'easting' in df.columns and 'northing' in df.columns:
+            try:
+                from pyproj import Transformer
+                xs = pd.to_numeric(df['easting'], errors='coerce')
+                ys = pd.to_numeric(df['northing'], errors='coerce')
+                if xs.max(skipna=True) > 180 or ys.max(skipna=True) > 90:
+                    transformer = Transformer.from_crs('EPSG:32632', 'EPSG:4326', always_xy=True)
+                    lon, lat = transformer.transform(xs.fillna(0.0).values, ys.fillna(0.0).values)
+                    df['Lon'] = lon
+                    df['Lat'] = lat
+                    print('Computed Lat/Lon from easting/northing')
+            except Exception as e:
+                print('Lat/Lon computation failed:', e)
+    except Exception:
+        pass
+
+    # recompute write columns to include any newly added Lat/Lon/z columns
+    cols = [c for c in ("src_file", "ping", "datetime", "datetime_parsed", "easting", "northing", "depth") if c in df.columns]
+    pref = ["CoordinateY","CoordinateX","h","GroundH(H)","Lat","Lon","Locked","Sats","Status","z_water","z_bed"]
+    other = [c for c in df.columns if c not in cols and c not in pref]
+    write_cols = []
+    write_cols.extend(cols)
+    for c in pref:
+        if c in df.columns:
+            write_cols.append(c)
+    write_cols.extend(other)
+    df.to_csv(out_path, index=False, columns=write_cols)
+    print(f'Wrote merged table: {out_path} ({len(df)} rows)')
 
 
 if __name__ == "__main__":

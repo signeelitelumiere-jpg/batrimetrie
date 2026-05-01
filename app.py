@@ -183,21 +183,33 @@ _LOGO_CANDIDATES = [
     Path("LOGO VECTORISE PNG.png"),
     ROOT / "LOGO VECTORISE PNG.png",
     Path(r"C:/Users/Admin/Pictures/DAT.ERT/batrimetrie/LOGO VECTORISE PNG.png"),
+    Path("assets/logo_flanc_eau.svg"),
 ]
 
-def _load_logo_b64():
+def _load_logo_b64_and_mime():
     for p in _LOGO_CANDIDATES:
         try:
             if p.exists():
-                return base64.b64encode(p.read_bytes()).decode()
+                data = p.read_bytes()
+                b64 = base64.b64encode(data).decode()
+                suffix = p.suffix.lower()
+                if suffix == ".svg":
+                    mime = "image/svg+xml"
+                elif suffix in (".jpg", ".jpeg"):
+                    mime = "image/jpeg"
+                elif suffix == ".webp":
+                    mime = "image/webp"
+                else:
+                    mime = "image/png"
+                return mime, b64
         except Exception:
             pass
-    return None
+    return None, None
 
-_logo_b64 = _load_logo_b64()
+_logo_mime, _logo_b64 = _load_logo_b64_and_mime()
 _logo_html = (
-    f'<img src="data:image/png;base64,{_logo_b64}" style="height:68px;object-fit:contain;'
-    f'filter:drop-shadow(0 0 8px #00e5ff);margin-right:1.2rem;flex-shrink:0;" alt="Logo"/>'
+    (f'<img src="data:{_logo_mime};base64,{_logo_b64}" style="height:68px;object-fit:contain;'
+     f'filter:drop-shadow(0 0 8px #00e5ff);margin-right:1.2rem;flex-shrink:0;" alt="Logo"/>')
     if _logo_b64 else
     '<div style="width:68px;height:68px;border:1px solid rgba(0,229,255,0.3);'
     'border-radius:4px;display:flex;align-items:center;justify-content:center;margin-right:1.2rem;">'
@@ -694,6 +706,69 @@ def render_uzf_section():
     # Nettoyage
     try:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+    # ------- Button: add z_water / z_bed to canonical GPS CSVs
+    try:
+        st.markdown('<div style="height:0.6rem"></div>', unsafe_allow_html=True)
+        gps_dir = Path('analysis') / 'output_new'
+        gps_files = sorted([p for p in gps_dir.glob('*_gps_data.csv')]) if gps_dir.exists() else []
+        gps_choices = ['Tous les fichiers'] + [p.name for p in gps_files]
+        # default to validated canonical GPS file if present
+        default_name = 'testbaty-Outcome data_gps_data.csv'
+        try:
+            default_index = gps_choices.index(default_name) if default_name in gps_choices else 0
+        except Exception:
+            default_index = 0
+        sel = st.selectbox('Fichier GPS cible', gps_choices, index=default_index, key='gps_target_select')
+        if st.button('➕ Ajouter z_water / z_bed aux GPS', key='btn_add_z_gps'):
+            try:
+                if sel != 'Tous les fichiers':
+                    target = str(gps_dir / sel)
+                    cmd = [sys.executable, 'analysis/scripts/add_z_to_gps.py', target]
+                else:
+                    cmd = [sys.executable, 'analysis/scripts/add_z_to_gps.py']
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if proc.returncode == 0:
+                    st.success('z_water / z_bed ajoutés avec succès.')
+                    if proc.stdout:
+                        st.code(proc.stdout[:2000])
+                else:
+                    st.error('Erreur lors de l ajout des colonnes z.')
+                    st.code((proc.stdout + '\n' + proc.stderr)[:4000])
+            except Exception as e:
+                st.error(f'Exception: {e}')
+        # Populate Status heuristic
+        st.markdown('<div style="height:0.6rem"></div>', unsafe_allow_html=True)
+        if st.button('🛈 Remplir Status via heuristique (auto)', key='btn_assign_status'):
+            try:
+                cmd = [sys.executable, 'analysis/scripts/assign_status_from_gps.py']
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if proc.returncode == 0:
+                    st.success('Status et Sats assignés automatiquement.')
+                    if proc.stdout:
+                        st.code(proc.stdout[:4000])
+                else:
+                    st.error('Erreur lors de l assignation des Status.')
+                    st.code((proc.stdout + '\n' + proc.stderr)[:4000])
+            except Exception as e:
+                st.error(f'Exception: {e}')
+        # Run canonical UZF pipeline (testbaty)
+        st.markdown('<div style="height:0.4rem"></div>', unsafe_allow_html=True)
+        if st.button('▶️ Exécuter pipeline UZF canonique (testbaty)', key='btn_run_testbaty'):
+            try:
+                cmd = [sys.executable, 'analysis/scripts/run_process_testbaty_uzf.py']
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if proc.returncode == 0:
+                    st.success('Pipeline UZF exécuté — fichiers écrits dans analysis/output_new.')
+                    if proc.stdout:
+                        st.code(proc.stdout[:4000])
+                else:
+                    st.error('Erreur lors de l exécution du pipeline UZF.')
+                    st.code((proc.stdout + '\n' + proc.stderr)[:8000])
+            except Exception as e:
+                st.error(f'Exception: {e}')
     except Exception:
         pass
 
@@ -1540,6 +1615,48 @@ with main_tabs[3]:
         st.info("Aucun tableau généré trouvé. Lancez un scan ou uploadez un .uzf.")
 
     hline()
+
+    # Section explicite : Aperçu canonique merged_data.csv (force load)
+    try:
+        mpath = ROOT / 'analysis' / 'output_new' / 'merged_data.csv'
+        if mpath.exists():
+            st.markdown("<div style='font-family:Orbitron,monospace;font-size:0.78rem;color:#00ffd4;margin-top:0.6rem;'>◈ APERÇU : merged_data.csv (CANONIQUE)</div>", unsafe_allow_html=True)
+            if st.button('🔄 Rafraîchir merged_data.csv', key='refresh_merged_preview'):
+                st.experimental_rerun()
+            try:
+                df_m = pd.read_csv(mpath)
+                # Prioriser affichage des colonnes clés
+                show_cols = [c for c in ['datetime_parsed','Lat','Lon','z_bed','z_water','h','CoordinateX','CoordinateY'] if c in df_m.columns]
+                if show_cols:
+                    st.dataframe(df_m[show_cols].head(500), use_container_width=True, height=360)
+                else:
+                    st.dataframe(df_m.head(200), use_container_width=True, height=360)
+                st.download_button('⬇ Télécharger merged_data.csv', data=mpath.read_bytes(), file_name=mpath.name, mime='text/csv', key='dl_merged_data_file')
+            except Exception as e:
+                st.warning(f"Impossible de lire {mpath.name} : {e}")
+    except Exception:
+        pass
+
+    # Run canonical parse pipeline (Ln*.data -> merged)
+    st.markdown('<div style="font-family:Orbitron,monospace;font-size:0.78rem;color:#00ffd4;letter-spacing:0.14em;margin-bottom:0.5rem;margin-top:0.6rem;">◈ LANCER LES PIPELINES CANONIQUES</div>', unsafe_allow_html=True)
+    col_run1, col_run2 = st.columns(2)
+    with col_run1:
+        if st.button('▶️ Exécuter parse_raw_and_merge → merged_data.csv', key='btn_run_parse_raw'):
+            try:
+                cmd = [sys.executable, 'analysis/scripts/run_process_owendo_data.py']
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if proc.returncode == 0:
+                    st.success('Pipeline parse_raw_and_merge exécuté — merged_data.csv écrit.')
+                    if proc.stdout:
+                        st.code(proc.stdout[:4000])
+                else:
+                    st.error('Erreur lors de l exécution du pipeline parse_raw_and_merge.')
+                    st.code((proc.stdout + '\n' + proc.stderr)[:8000])
+            except Exception as e:
+                st.error(f'Exception: {e}')
+    with col_run2:
+        if st.button('▶️ Rafraîchir la liste des CSVs générés', key='btn_refresh_csvs'):
+            st.experimental_rerun()
 
     # Upload merged manuellement
     st.markdown('<div style="font-family:Orbitron,monospace;font-size:0.78rem;color:#ffb300;letter-spacing:0.14em;margin-bottom:0.5rem;">◈ UPLOADER UN CSV FUSIONNÉ</div>', unsafe_allow_html=True)

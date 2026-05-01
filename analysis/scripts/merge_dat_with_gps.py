@@ -75,6 +75,11 @@ if uzf_gps_csv.exists():
             m['Lat'] = pd.to_numeric(nearest['latitude'], errors='coerce')
         if 'longitude' in nearest.columns:
             m['Lon'] = pd.to_numeric(nearest['longitude'], errors='coerce')
+        # satellite count / solution type
+        if 'satellite_visible' in nearest.columns:
+            m['Sats'] = pd.to_numeric(nearest['satellite_visible'], errors='coerce')
+        if 'solution_type' in nearest.columns:
+            m['Status'] = nearest['solution_type'].astype(str)
         # datetime from utcTime
         if 'utcTime' in nearest.columns:
             try:
@@ -92,34 +97,19 @@ if uzf_gps_csv.exists():
         if gh is not None:
             m['GroundH(H)'] = gh
 
-    # If Lat/Lon still missing but easting/northing present, try converting to WGS84
-    if ('Lat' not in m.columns or 'Lon' not in m.columns or m['Lat'].isna().all() or m['Lon'].isna().all()) and 'easting' in m.columns and 'northing' in m.columns:
-        try:
-            from pyproj import Transformer
-            xs = pd.to_numeric(m['easting'], errors='coerce').fillna(0.0).values
-            ys = pd.to_numeric(m['northing'], errors='coerce').fillna(0.0).values
-            if xs.max() > 180 or ys.max() > 90:
-                transformer = Transformer.from_crs('EPSG:32632', 'EPSG:4326', always_xy=True)
-                lon, lat = transformer.transform(xs, ys)
-                m['Lon'] = lon
-                m['Lat'] = lat
-        except Exception:
-            pass
-
 # compute z_water and z_bed
 if 'GroundH(H)' in m.columns:
     m['z_water'] = m['GroundH(H)']
 else:
     m['z_water'] = 0.0
 if 'depth' in m.columns:
-    # if depth values are negative (below surface) we add them, else subtract
-    try:
-        if (m['depth'].dropna() < 0).mean() > 0.5:
-            m['z_bed'] = m['z_water'] + m['depth']
-        else:
-            m['z_bed'] = m['z_water'] - m['depth'].abs()
-    except Exception:
-        m['z_bed'] = m['z_water']
+    m['z_bed'] = m['z_water'] - m['depth']
+
+# try to ensure Status/Sats exist
+if 'Status' not in m.columns:
+    m['Status'] = ''
+if 'Sats' not in m.columns:
+    m['Sats'] = pd.NA
 
 # save merged into the UZF merged_auto path (overwrite)
 out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -136,7 +126,10 @@ for _, rr in m.iterrows():
     ghv = rr.get('GroundH(H)','')
     lat = rr.get('Lat','')
     lon = rr.get('Lon','')
-    lines.append(f"{cy} {cx} {h} {ghv} {lat} {lon} 0 0 0")
+    locked = rr.get('Locked', 0)
+    sats = rr.get('Sats', '')
+    status = rr.get('Status', '')
+    lines.append(f"{cy} {cx} {h} {ghv} {lat} {lon} {locked} {sats} {status}")
 ow_txt.write_text('\n'.join(lines), encoding='utf-8')
 
 print('Wrote', out_csv)
