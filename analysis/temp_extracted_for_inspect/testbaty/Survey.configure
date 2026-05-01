@@ -1,0 +1,14 @@
+<SurveyConfig>
+  <AntennaHeight>0.26</AntennaHeight>
+  <AutomaticSailingSpeed>2.5</AutomaticSailingSpeed>
+  <CollectConditionValue>4</CollectConditionValue>
+  <CollectDiplay>1</CollectDiplay>
+  <CollectMethod>1</CollectMethod>
+  <CollectMethodParaDistance>1.0</CollectMethodParaDistance>
+  <CollectMethodParaTime>3.0</CollectMethodParaTime>
+  <DraughtValue>0.15</DraughtValue>
+  <SoundVelocity>1500.0</SoundVelocity>
+  <SounderType>0</SounderType>
+  <SurveyPointOffset>0:0.511:0</SurveyPointOffset>
+  <projectName>testbaty</projectName>
+</SurveyConfig>

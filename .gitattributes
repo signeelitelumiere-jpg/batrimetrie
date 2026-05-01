@@ -1,0 +1,22 @@
+# Normalize text files and mark binaries to avoid EOL conversions
+* text=auto
+
+# Force LF on scripts and python files
+*.py text eol=lf
+*.sh text eol=lf
+
+# Powershell on Windows use CRLF
+*.ps1 text eol=crlf
+
+# Mark common binary/model files as binary to prevent EOL conversion
+*.safetensors binary
+*.gguf binary
+*.ckpt binary
+*.bin binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.tar.gz binary
+*.pdf binary

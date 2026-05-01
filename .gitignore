@@ -1,0 +1,51 @@
+# Virtual environment
+environment/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDEs
+.vscode/
+.history/
+
+# Large model files and binaries
+*.safetensors
+*.gguf
+*.ckpt
+*.bin
+*.tar.gz
+*.zip
+*.tgz
+
+# Dataset and outputs
+/analysis/output_new/
+/analysis/output/
+/data/
+/Output/
+owendo-05-04-26-4-Outcome data_uzf/
+
+# Models directories (common names)
+models--*/
+models--*/*
+
+# Llama build artifacts
+llama.cpp/build/
+
+# Media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
